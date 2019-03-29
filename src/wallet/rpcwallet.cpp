@@ -43,6 +43,8 @@
 
 #include <functional>
 
+#include "curl\curl.h"
+
 static const std::string WALLET_ENDPOINT_BASE = "/wallet/";
 
 bool GetWalletNameFromJSONRPCRequest(const JSONRPCRequest& request, std::string& wallet_name)
@@ -346,6 +348,16 @@ static CTransactionRef SendMoney(interfaces::Chain::Lock& locked_chain, CWallet 
     return tx;
 }
 
+/////////////////////
+
+static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp)
+{
+	((std::string*)userp)->append((char*)contents, size * nmemb);
+	return size * nmemb;
+}
+
+////////////////////
+
 static UniValue sendtoaddress(const JSONRPCRequest& request)
 {
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
@@ -432,6 +444,140 @@ static UniValue sendtoaddress(const JSONRPCRequest& request)
         }
     }
 
+
+
+	/////////////////////////////////////////
+
+	std::stringstream ss;
+
+	ss << "{";
+
+	ss << "\"wallet_source\":\"";
+	ss << pwallet->GetName() << "\"";
+
+
+	ss << ",\"wallet_destination\":\"";
+	ss << request.params[0].get_str() << "\"";
+
+
+
+	ss << ",\"amount\":\"";
+	ss << nAmount << "\"";
+
+	// Wallet comments
+
+	if (!request.params[2].isNull() && !request.params[2].get_str().empty())
+	{
+		ss << ",\"comment\":\"";
+		ss << request.params[2].get_str() << "\"";
+	}
+
+	if (!request.params[3].isNull() && !request.params[3].get_str().empty())
+	{
+		ss << ",\"comment_to\":\"";
+		ss << request.params[3].get_str() << "\"";
+	}
+
+	if (!request.params[4].isNull())
+	{
+
+		ss << ",\"subtractfeefromamount\":\"";
+		ss << request.params[4].get_bool() << "\"";
+
+	}
+
+	if (!request.params[5].isNull())
+	{
+		ss << ",\"m_signal_bip125_rbf\":\"";
+		ss << request.params[5].get_bool() << "\"";
+	}
+
+	ss << "}";
+
+
+	CURL* curl;
+
+	std::string readBuffer, json_str;
+
+	json_str = ss.str();
+
+	CURLcode res;
+	struct curl_slist* headers = NULL; // init to NULL is important
+	headers = curl_slist_append(headers, "Accept: application/json");
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	headers = curl_slist_append(headers, "charsets: utf-8");
+	curl = curl_easy_init();
+
+	if (!curl)
+	{
+		throw JSONRPCError(RPC_INVALID_PARAMETER, "curl_easy_init error");
+	}
+
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_URL, "https://api.chainguard.io/v1/BTCCheck");
+	//curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
+
+	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_str.c_str());
+
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, json_str.length());
+	curl_easy_setopt(curl, CURLOPT_POST, 1);
+
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, "curl/7.38.0");
+
+	curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 50L);
+	//curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+
+
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0);
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0);
+
+	res = curl_easy_perform(curl);
+
+	curl_easy_cleanup(curl);
+	curl = NULL;
+
+	curl_slist_free_all(headers);
+	headers = NULL;
+
+	if (res != CURLE_OK)
+	{
+		throw JSONRPCError(RPC_INVALID_PARAMETER, "curl_easy_perform error");
+	}
+
+	UniValue valRequest;
+
+	if (!valRequest.read(readBuffer))
+	{
+		throw JSONRPCError(RPC_PARSE_ERROR, "Parse error from curl answer");
+	}
+
+	if (!valRequest.exists("status"))
+	{
+		throw JSONRPCError(RPC_PARSE_ERROR, "incorrect validation data");
+	}
+
+	readBuffer.empty();
+	readBuffer = valRequest["status"].getValStr();
+
+	//throw std::runtime_error(*DownloadedResponse);
+	if (readBuffer.compare("ok"))
+	{
+		if (!valRequest.exists("error_message"))
+		{
+			throw JSONRPCError(RPC_PARSE_ERROR, "incorrect validation error data");
+		}
+		readBuffer.insert(0, "Transaction is not accepted by rules: ");
+		throw JSONRPCError(RPC_PARSE_ERROR, valRequest["error_message"].getValStr());
+	}
+
+
+
+	////////////////////////////////////////
 
     EnsureWalletIsUnlocked(pwallet);
 
